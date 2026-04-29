@@ -31,6 +31,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          mapfile -t reactor_modules < <(
+            sed -n 's:.*<module>\(.*\)</module>.*:\1:p' pom.xml |
+              sed 's/^\s*//; s/\s*$//' |
+              grep -v '^$'
+          )
+
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             base_sha="${{ github.event.pull_request.base.sha }}"
             head_sha="${{ github.event.pull_request.head.sha }}"
@@ -74,16 +80,14 @@ jobs:
             if [[ "$top_level_dir" == "common-library" ]]; then
               build_all=true
             elif [[ -f "$top_level_dir/pom.xml" ]]; then
-              services+=("$top_level_dir")
+              if printf '%s\n' "${reactor_modules[@]}" | grep -qx "$top_level_dir"; then
+                services+=("$top_level_dir")
+              fi
             fi
           done
 
           if [[ "$build_all" == "true" ]]; then
-            mapfile -t services < <(
-              find . -mindepth 2 -maxdepth 2 -name pom.xml -printf '%h\n' |
-                sed 's|^\./||' |
-                sort -u
-            )
+            services=("${reactor_modules[@]}")
           fi
 
           if [[ ${#services[@]} -eq 0 ]]; then
