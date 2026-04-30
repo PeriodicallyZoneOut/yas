@@ -13,6 +13,7 @@ permissions:
   contents: read
   actions: write
   statuses: write
+  checks: write
 
 
 jobs:
@@ -157,6 +158,76 @@ jobs:
           echo "Maven test failed after retries."
           exit 1
 
+      - name: Generate JaCoCo report for ${{ matrix.service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt: mvn jacoco:report (${{ matrix.service }})"
+            if mvn -B -ntp -pl ${{ matrix.service }} jacoco:report; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "JaCoCo report generation failed after retries."
+          exit 1
+
+      - name: Enforce coverage threshold (70%) for ${{ matrix.service }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          COVERAGE_THRESHOLD: '0.70'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          service = os.environ['SERVICE']
+          threshold = float(os.environ.get('COVERAGE_THRESHOLD', '0.70'))
+          report_path = Path(service) / 'target' / 'site' / 'jacoco' / 'jacoco.xml'
+
+          if not report_path.exists():
+            print(f"ERROR: Missing JaCoCo XML report: {report_path}")
+            sys.exit(1)
+
+          root = ET.parse(report_path).getroot()
+          line_counter = None
+          for counter in root.findall('counter'):
+            if counter.get('type') == 'LINE':
+              line_counter = counter
+              break
+
+          if line_counter is None:
+            print("ERROR: No LINE counter found in JaCoCo XML.")
+            sys.exit(1)
+
+          missed = int(line_counter.get('missed', '0'))
+          covered = int(line_counter.get('covered', '0'))
+          total = missed + covered
+          ratio = (covered / total) if total else 0.0
+
+          print(f"Coverage (LINE) for {service}: {covered}/{total} = {ratio:.2%}")
+          print(f"Threshold: {threshold:.2%}")
+
+          if ratio + 1e-12 < threshold:
+            print("ERROR: Coverage below threshold.")
+            sys.exit(1)
+          PY
+
+      - name: Upload JaCoCo coverage report for ${{ matrix.service }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: |
+            ${{ matrix.service }}/target/site/jacoco/jacoco.xml
+            ${{ matrix.service }}/target/site/jacoco/index.html
+            ${{ matrix.service }}/target/site/jacoco/jacoco.csv
+          if-no-files-found: warn
+
       - name: Upload test results for ${{ matrix.service }}
         if: always()
         uses: actions/upload-artifact@v4
@@ -199,10 +270,43 @@ jobs:
           echo "Maven build failed after retries."
           exit 1
 
+      - name: Upload build artifact for ${{ matrix.service }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.service }}
+          path: |
+            ${{ matrix.service }}/target/*.jar
+            ${{ matrix.service }}/target/*.war
+            !${{ matrix.service }}/target/*.jar.original
+            !${{ matrix.service }}/target/*-tests.jar
+          if-no-files-found: warn
+
+  test-summary:
+    name: Test Summary
+    needs: [detect-changes, test]
+    if: always() && needs.detect-changes.outputs.has_services == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download test result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: artifacts/test-results
+          merge-multiple: true
+
+      - name: Publish JUnit test report
+        uses: dorny/test-reporter@v1
+        with:
+          name: Unit Tests
+          path: artifacts/test-results/**/*.xml
+          reporter: java-junit
+          fail-on-error: 'false'
+
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [detect-changes, test, build]
+    needs: [detect-changes, test, build, test-summary]
     if: always()
     steps:
       - name: Evaluate results
