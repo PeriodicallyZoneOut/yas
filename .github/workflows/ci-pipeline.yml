@@ -158,44 +158,44 @@ jobs:
           echo "Maven test failed after retries."
           exit 1
 
-      - name: Detect whether module has unit tests
-        id: test-detect
+      - name: Detect whether module produced coverage data
+        id: coverage-detect
         shell: bash
         run: |
           set -euo pipefail
           service='${{ matrix.service }}'
 
-          has_tests=false
-
-          if compgen -G "$service/target/surefire-reports/*.xml" > /dev/null; then
-            has_tests=true
-          elif compgen -G "$service/target/failsafe-reports/*.xml" > /dev/null; then
-            has_tests=true
+          has_coverage_exec=false
+          if [[ -s "$service/target/jacoco.exec" ]]; then
+            has_coverage_exec=true
           fi
 
-          echo "has_tests=$has_tests" >> "$GITHUB_OUTPUT"
+          echo "has_coverage_exec=$has_coverage_exec" >> "$GITHUB_OUTPUT"
 
-          if [[ "$has_tests" != "true" ]]; then
-            echo "No JUnit XML results found for $service; skipping JaCoCo report + coverage enforcement."
+          if [[ "$has_coverage_exec" != "true" ]]; then
+            echo "No JaCoCo execution data ($service/target/jacoco.exec); skipping report + threshold enforcement."
           fi
 
       - name: Generate JaCoCo report for ${{ matrix.service }}
-        if: steps.test-detect.outputs.has_tests == 'true'
+        if: steps.coverage-detect.outputs.has_coverage_exec == 'true'
         shell: bash
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
             echo "Attempt $attempt: mvn jacoco:report (${{ matrix.service }})"
             if mvn -B -ntp -pl ${{ matrix.service }} jacoco:report; then
-              exit 0
+              break
             fi
             sleep $((attempt * 10))
           done
-          echo "JaCoCo report generation failed after retries."
-          exit 1
+
+          if [[ ! -f "${{ matrix.service }}/target/site/jacoco/jacoco.xml" ]]; then
+            echo "JaCoCo report did not generate jacoco.xml; failing to avoid false green." >&2
+            exit 1
+          fi
 
       - name: Enforce coverage threshold (70%) for ${{ matrix.service }}
-        if: steps.test-detect.outputs.has_tests == 'true'
+        if: steps.coverage-detect.outputs.has_coverage_exec == 'true'
         env:
           SERVICE: ${{ matrix.service }}
           COVERAGE_THRESHOLD: '0.70'
@@ -241,7 +241,7 @@ jobs:
           PY
 
       - name: Upload JaCoCo coverage report for ${{ matrix.service }}
-        if: always() && steps.test-detect.outputs.has_tests == 'true'
+        if: always() && steps.coverage-detect.outputs.has_coverage_exec == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.service }}
@@ -249,6 +249,33 @@ jobs:
             ${{ matrix.service }}/target/site/jacoco/jacoco.xml
             ${{ matrix.service }}/target/site/jacoco/index.html
             ${{ matrix.service }}/target/site/jacoco/jacoco.csv
+          if-no-files-found: warn
+
+      - name: Upload placeholder coverage note (no tests/coverage)
+        if: always() && steps.coverage-detect.outputs.has_coverage_exec != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          service='${{ matrix.service }}'
+          out_dir="_coverage_placeholders/$service"
+          mkdir -p "$out_dir"
+          cat > "$out_dir/NO_COVERAGE.md" <<'EOF'
+          No JaCoCo coverage data was produced for this module in this run.
+
+          Common reasons:
+          - The module has no unit tests yet (Surefire: "No tests to run").
+          - Tests were skipped.
+
+          Action:
+          - Implement unit tests in Task 4; once tests execute, JaCoCo will generate jacoco.xml and CI will enforce the 70% threshold.
+          EOF
+
+      - name: Upload placeholder coverage artifact
+        if: always() && steps.coverage-detect.outputs.has_coverage_exec != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: _coverage_placeholders/${{ matrix.service }}/NO_COVERAGE.md
           if-no-files-found: warn
 
       - name: Upload test results for ${{ matrix.service }}
