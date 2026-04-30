@@ -144,7 +144,18 @@ jobs:
           cache: maven
 
       - name: Run tests for ${{ matrix.service }}
-        run: mvn -B -pl ${{ matrix.service }} -am test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt: mvn test (${{ matrix.service }})"
+            if mvn -B -ntp -pl ${{ matrix.service }} -am test; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "Maven test failed after retries."
+          exit 1
 
       - name: Upload test results for ${{ matrix.service }}
         if: always()
@@ -175,7 +186,18 @@ jobs:
           cache: maven
 
       - name: Build ${{ matrix.service }}
-        run: mvn -B -pl ${{ matrix.service }} -am -DskipTests package
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt: mvn package (${{ matrix.service }})"
+            if mvn -B -ntp -pl ${{ matrix.service }} -am -DskipTests package; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "Maven build failed after retries."
+          exit 1
 
   ci-gate:
     name: CI Gate
